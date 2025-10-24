@@ -1,0 +1,19 @@
+name: clip-synthetic-detection
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - numpy
+  - pandas
+  - scipy
+  - tqdm
+  - pytorch-cuda=11.8
+  - pytorch
+  - torchvision
+  - pip
+  - pip:
+      - open_clip_torch
+      - huggingface_hub
