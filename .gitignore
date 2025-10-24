@@ -1,4 +1,6 @@
 data/synthbuster
+results.csv
+screenlog.*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
