@@ -24,7 +24,10 @@ import glob
 import sys
 import yaml
 import logging
-from PIL import Image
+from PIL import Image, ImageFile
+
+# Allow PIL to load truncated images (handles partially corrupted JPEG files)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from torchvision.transforms  import CenterCrop, Resize, Compose, InterpolationMode
 from utils.processing import make_normalize
