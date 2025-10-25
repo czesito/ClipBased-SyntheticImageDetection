@@ -1,6 +1,9 @@
 data/synthbuster
 results.csv
 screenlog.*
+data/TISDC2025
+auc_table.csv
+output
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

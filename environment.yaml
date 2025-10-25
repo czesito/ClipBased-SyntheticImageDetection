@@ -17,3 +17,4 @@ dependencies:
   - pip:
       - open_clip_torch
       - huggingface_hub
+      - scikit-learn

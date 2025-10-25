@@ -68,17 +68,16 @@ def runnig_tests(input_csv, weights_dir, models_list, device, batch_size=1, outp
         table.to_csv(output_csv, index=False)
         logging.info(f"Initialized output CSV: {output_csv}")
     
-    models_dict = dict()
+    # Store model configs instead of loading all models at once
+    model_configs = dict()
     transform_dict = dict()
-    print("Models:")
+    print("Preparing models:")
     for model_name in models_list:
         try:
             print(model_name, flush=True)
             _, model_path, arch, norm_type, patch_size = get_config(model_name, weights_dir=weights_dir)
 
-            model = load_weights(create_architecture(arch), model_path)
-            model = model.to(device).eval()
-
+            # Create transform but don't load model yet
             transform = list()
             if patch_size is None:
                 print('input none', flush=True)
@@ -101,10 +100,16 @@ def runnig_tests(input_csv, weights_dir, models_list, device, batch_size=1, outp
             transform.append(make_normalize(norm_type))
             transform = Compose(transform)
             transform_dict[transform_key] = transform
-            models_dict[model_name] = (transform_key, model)
+            
+            # Store config instead of loading model
+            model_configs[model_name] = {
+                'transform_key': transform_key,
+                'model_path': model_path,
+                'arch': arch
+            }
             print(flush=True)
         except Exception as e:
-            logging.error(f"Failed to load model {model_name}: {e}")
+            logging.error(f"Failed to prepare model {model_name}: {e}")
             # Remove the column for failed model
             table = table.drop(columns=[model_name])
             continue
@@ -112,8 +117,8 @@ def runnig_tests(input_csv, weights_dir, models_list, device, batch_size=1, outp
     ### test
     with torch.no_grad():
         
-        do_models = list(models_dict.keys())
-        do_transforms = set([models_dict[_][0] for _ in do_models])
+        do_models = list(model_configs.keys())
+        do_transforms = set([model_configs[_]['transform_key'] for _ in do_models])
         print(do_models)
         print(do_transforms)
         print(flush=True)
@@ -123,79 +128,94 @@ def runnig_tests(input_csv, weights_dir, models_list, device, batch_size=1, outp
             return table
         
         print("Running the Tests")
-        batch_img = {k: list() for k in transform_dict}
-        batch_id = list()
-        last_index = table.index[-1]
-        processed_count = 0
-        failed_images = []
         
-        for index in tqdm.tqdm(table.index, total=len(table)):
-            filename = os.path.join(rootdataset, table.loc[index, 'filename'])
+        # Process each model separately to save memory
+        for model_name in do_models:
+            logging.info(f"Processing with model: {model_name}")
             
-            # Try to load and transform the image
+            # Load only the current model
             try:
-                img = Image.open(filename).convert('RGB')
-                for k in transform_dict:
-                    batch_img[k].append(transform_dict[k](img))
-                batch_id.append(index)
-            except FileNotFoundError:
-                logging.warning(f"File not found: {filename}")
-                failed_images.append(filename)
-                # Mark as failed for all models
-                for model_name in do_models:
-                    table.loc[index, model_name] = np.nan
-                continue
+                config = model_configs[model_name]
+                model = load_weights(create_architecture(config['arch']), config['model_path'])
+                model = model.to(device).eval()
             except Exception as e:
-                logging.warning(f"Error loading/transforming {filename}: {e}")
-                failed_images.append(filename)
-                # Mark as failed for all models
-                for model_name in do_models:
-                    table.loc[index, model_name] = np.nan
+                logging.error(f"Failed to load model {model_name}: {e}")
                 continue
-
-            if (len(batch_id) >= batch_size) or (index==last_index):
+            
+            batch_img = list()
+            batch_id = list()
+            last_index = table.index[-1]
+            processed_count = 0
+            failed_images = []
+            
+            for index in tqdm.tqdm(table.index, total=len(table), desc=f"Model {model_name}"):
+                filename = os.path.join(rootdataset, table.loc[index, 'filename'])
+                
+                # Try to load and transform the image
                 try:
-                    for k in do_transforms:
-                        batch_img[k] = torch.stack(batch_img[k], 0)
-
-                    for model_name in do_models:
-                        try:
-                            out_tens = models_dict[model_name][1](batch_img[models_dict[model_name][0]].clone().to(device)).cpu().numpy()
-
-                            if out_tens.shape[1] == 1:
-                                out_tens = out_tens[:, 0]
-                            elif out_tens.shape[1] == 2:
-                                out_tens = out_tens[:, 1] - out_tens[:, 0]
-                            else:
-                                logging.error(f"Unexpected output shape for {model_name}: {out_tens.shape}")
-                                continue
-                            
-                            if len(out_tens.shape) > 1:
-                                logit1 = np.mean(out_tens, (1, 2))
-                            else:
-                                logit1 = out_tens
-
-                            for ii, logit in zip(batch_id, logit1):
-                                table.loc[ii, model_name] = logit
-                        except Exception as e:
-                            logging.error(f"Error processing batch with model {model_name}: {e}")
-                            # Mark batch as failed for this model
-                            for ii in batch_id:
-                                table.loc[ii, model_name] = np.nan
-                            continue
-                    
-                    processed_count += len(batch_id)
-                    
-                    # Periodically save results
-                    if output_csv is not None and processed_count % save_interval == 0:
-                        table.to_csv(output_csv, index=False)
-                        logging.info(f"Progress saved: {processed_count}/{len(table)} samples processed")
-                
+                    img = Image.open(filename).convert('RGB')
+                    batch_img.append(transform_dict[config['transform_key']](img))
+                    batch_id.append(index)
+                except FileNotFoundError:
+                    if filename not in failed_images:
+                        logging.warning(f"File not found: {filename}")
+                        failed_images.append(filename)
+                    table.loc[index, model_name] = np.nan
+                    continue
                 except Exception as e:
-                    logging.error(f"Error processing batch: {e}")
-                
-                batch_img = {k: list() for k in transform_dict}
-                batch_id = list()
+                    if filename not in failed_images:
+                        logging.warning(f"Error loading/transforming {filename}: {e}")
+                        failed_images.append(filename)
+                    table.loc[index, model_name] = np.nan
+                    continue
+
+                if (len(batch_id) >= batch_size) or (index==last_index):
+                    try:
+                        batch_tensor = torch.stack(batch_img, 0)
+                        out_tens = model(batch_tensor.to(device)).cpu().numpy()
+
+                        if out_tens.shape[1] == 1:
+                            out_tens = out_tens[:, 0]
+                        elif out_tens.shape[1] == 2:
+                            out_tens = out_tens[:, 1] - out_tens[:, 0]
+                        else:
+                            logging.error(f"Unexpected output shape for {model_name}: {out_tens.shape}")
+                            batch_img = list()
+                            batch_id = list()
+                            continue
+                        
+                        if len(out_tens.shape) > 1:
+                            logit1 = np.mean(out_tens, (1, 2))
+                        else:
+                            logit1 = out_tens
+
+                        for ii, logit in zip(batch_id, logit1):
+                            table.loc[ii, model_name] = logit
+                        
+                        processed_count += len(batch_id)
+                        
+                        # Periodically save results
+                        if output_csv is not None and processed_count % save_interval == 0:
+                            table.to_csv(output_csv, index=False)
+                            logging.info(f"Progress saved: {processed_count}/{len(table)} samples processed for {model_name}")
+                    
+                    except Exception as e:
+                        logging.error(f"Error processing batch with model {model_name}: {e}")
+                        # Mark batch as failed for this model
+                        for ii in batch_id:
+                            table.loc[ii, model_name] = np.nan
+                    
+                    batch_img = list()
+                    batch_id = list()
+            
+            # Free GPU memory after each model
+            del model
+            torch.cuda.empty_cache()
+            
+            # Save after each model completes
+            if output_csv is not None:
+                table.to_csv(output_csv, index=False)
+                logging.info(f"Model {model_name} completed. Results saved.")
         
         # Final save
         if output_csv is not None:

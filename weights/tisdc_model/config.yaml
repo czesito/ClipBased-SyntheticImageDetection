@@ -1,0 +1,5 @@
+arch: opencliplinearnext_clipL14commonpool
+model_name: tisdc_model
+norm_type: clip
+patch_size: Clip224
+classifier_file: svm_classifier.pkl
